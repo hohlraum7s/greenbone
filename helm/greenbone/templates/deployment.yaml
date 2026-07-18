@@ -1,0 +1,321 @@
+{{- $clusterName := default (printf "%s-cluster" .Release.Name) .Values.cluster.fullnameOverride -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "greenbone.fullname" . }}
+  labels:
+    {{- include "greenbone.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "greenbone.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        {{- include "greenbone.selectorLabels" . | nindent 8 }}
+    spec:
+      initContainers:
+        # 1. Wait for CNPG Database to be ready
+        - name: wait-for-db
+          image: "{{ .Values.images.redis.repository }}:{{ .Values.images.redis.tag }}"
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z -w 2 $PGHOST $PGPORT; do
+                echo "Waiting for database at $PGHOST:$PGPORT..."
+                sleep 2
+              done
+              echo "Database is ready!"
+          env:
+            - name: PGHOST
+              value: {{ default (printf "%s-rw" $clusterName) .Values.database.host | quote }}
+            - name: PGPORT
+              value: {{ .Values.database.port | quote }}
+
+
+        # 2. Setup GPG Data keys
+        - name: gpg-data-setup
+          image: "{{ .Values.images.redis.repository }}:{{ .Values.images.redis.tag }}" # We can use any image that runs, but registry.community.greenbone.net/community/gpg-data is best
+          imagePullPolicy: {{ .Values.images.gvmd.pullPolicy }}
+          # Override the image specifically for gpg-data
+          image: "registry.community.greenbone.net/community/gpg-data:latest"
+          volumeMounts:
+            - name: gpg-data
+              mountPath: /mnt
+
+        # 3. Configure OpenVAS configs and log files
+        - name: configure-openvas
+          image: "{{ .Values.images.openvasd.repository }}:{{ .Values.images.openvasd.tag }}"
+          command:
+            - /bin/sh
+            - -c
+            - |
+              printf "table_driven_lsc = yes\nopenvasd_server = http://localhost:80\n" > /mnt/openvas.conf
+              sed "s/127/128/" /etc/openvas/openvas_log.conf | sed 's/gvm/openvas/' > /mnt/openvas_log.conf
+              chmod 644 /mnt/openvas.conf
+              chmod 644 /mnt/openvas_log.conf
+              touch /var/log/openvas/openvas.log
+              chmod 666 /var/log/openvas/openvas.log
+          volumeMounts:
+            - name: openvas-data
+              mountPath: /mnt
+            - name: openvas-log-data
+              mountPath: /var/log/openvas
+
+        # 4. Copy GSA web static files
+        - name: gsa-static-copy
+          image: "{{ .Values.images.gsa.repository }}:{{ .Values.images.gsa.tag }}"
+          env:
+            - name: MOUNT_PATH
+              value: "/mnt/web"
+          volumeMounts:
+            - name: gsa-data
+              mountPath: /mnt/web
+
+        # 5. Setup Nginx configurations and TLS certificates
+        - name: gvm-config-setup
+          image: "{{ .Values.images.gvmConfig.repository }}:{{ .Values.images.gvmConfig.tag }}"
+          env:
+            - name: ENABLE_NGINX_CONFIG
+              value: "true"
+            - name: ENABLE_TLS_GENERATION
+              value: "true"
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /mnt/nginx/configs
+            - name: nginx-certificates
+              mountPath: /mnt/nginx/certs
+
+      containers:
+        # 1. Greenbone Vulnerability Manager Daemon (gvmd)
+        - name: gvmd
+          image: "{{ .Values.images.gvmd.repository }}:{{ .Values.images.gvmd.tag }}"
+          imagePullPolicy: {{ .Values.images.gvmd.pullPolicy }}
+          env:
+            - name: PGHOST
+              value: {{ default (printf "%s-rw" $clusterName) .Values.database.host | quote }}
+            - name: PGPORT
+              value: {{ .Values.database.port | quote }}
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: {{ .Values.database.username.existingSecretKey }}
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: {{ .Values.database.password.existingSecretKey }}
+            - name: PGDATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: {{ .Values.database.databaseName.existingSecretKey }}
+            - name: GVMD_ARGS
+              value: "--db-host=$(PGHOST) --db-port=$(PGPORT) -f"
+          volumeMounts:
+            - name: gvmd-data
+              mountPath: /var/lib/gvm
+            - name: scap-data
+              mountPath: /var/lib/gvm/scap-data/
+            - name: cert-data
+              mountPath: /var/lib/gvm/cert-data
+            - name: vt-data
+              mountPath: /var/lib/openvas/plugins
+            - name: gvmd-socket
+              mountPath: /run/gvmd
+            - name: ospd-socket
+              mountPath: /run/ospd
+
+        # 2. OSPD OpenVAS Scanner
+        - name: ospd-openvas
+          image: "{{ .Values.images.ospdOpenvas.repository }}:{{ .Values.images.ospdOpenvas.tag }}"
+          imagePullPolicy: {{ .Values.images.ospdOpenvas.pullPolicy }}
+          securityContext:
+            capabilities:
+              add:
+                - NET_ADMIN
+                - NET_RAW
+            privileged: true
+          command:
+            - /bin/sh
+            - -c
+            - |
+              while [ ! -S /run/redis/redis.sock ]; do
+                echo "Waiting for Redis socket..."
+                sleep 2
+              done
+              exec ospd-openvas -f --config /etc/gvm/ospd-openvas.conf --notus-feed-dir /var/lib/notus/advisories -m 666
+          volumeMounts:
+            - name: gpg-data
+              mountPath: /etc/openvas/gnupg
+            - name: vt-data
+              mountPath: /var/lib/openvas/plugins
+            - name: notus-data
+              mountPath: /var/lib/notus
+            - name: ospd-socket
+              mountPath: /run/ospd
+            - name: redis-socket
+              mountPath: /run/redis/
+            - name: openvas-data
+              mountPath: /etc/openvas/
+            - name: openvas-log-data
+              mountPath: /var/log/openvas
+
+        # 3. Redis Server (Unix socket config)
+        - name: redis-server
+          image: "{{ .Values.images.redis.repository }}:{{ .Values.images.redis.tag }}"
+          imagePullPolicy: {{ .Values.images.redis.pullPolicy }}
+          command:
+            - redis-server
+            - --port
+            - "0"
+            - --unixsocket
+            - /run/redis/redis.sock
+            - --unixsocketperm
+            - "770"
+            - --databases
+            - "128"
+          volumeMounts:
+            - name: redis-socket
+              mountPath: /run/redis/
+
+        # 4. OpenVAS Daemon (Notus support)
+        - name: openvasd
+          image: "{{ .Values.images.openvasd.repository }}:{{ .Values.images.openvasd.tag }}"
+          imagePullPolicy: {{ .Values.images.openvasd.pullPolicy }}
+          env:
+            - name: OPENVASD_MODE
+              value: "service_notus"
+            - name: GNUPGHOME
+              value: "/etc/openvas/gnupg"
+            - name: LISTENING
+              value: "0.0.0.0:80"
+          volumeMounts:
+            - name: openvas-data
+              mountPath: /etc/openvas
+            - name: openvas-log-data
+              mountPath: /var/log/openvas
+            - name: gpg-data
+              mountPath: /etc/openvas/gnupg
+            - name: notus-data
+              mountPath: /var/lib/notus
+
+        # 5. Greenbone Security Assistant Daemon (gsad API)
+        - name: gsad
+          image: "{{ .Values.images.gsad.repository }}:{{ .Values.images.gsad.tag }}"
+          imagePullPolicy: {{ .Values.images.gsad.pullPolicy }}
+          env:
+            - name: GSAD_HTTP_ONLY
+              value: "true"
+            - name: GSAD_API_ONLY
+              value: "true"
+            - name: GSAD_FOREGROUND
+              value: "true"
+          volumeMounts:
+            - name: gvmd-socket
+              mountPath: /run/gvmd
+
+        # 6. Nginx Web Front End
+        - name: nginx
+          image: "{{ .Values.images.nginx.repository }}:{{ .Values.images.nginx.tag }}"
+          imagePullPolicy: {{ .Values.images.nginx.pullPolicy }}
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/conf.d
+              readOnly: true
+            - name: nginx-certificates
+              mountPath: /etc/nginx/certs
+              readOnly: true
+            - name: gsa-data
+              mountPath: /usr/share/nginx/html
+              readOnly: true
+
+        # 7. OpenVAS Log Tail sidecar
+        - name: openvas-log-tail
+          image: "{{ .Values.images.openvasd.repository }}:{{ .Values.images.openvasd.tag }}"
+          imagePullPolicy: {{ .Values.images.openvasd.pullPolicy }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              until [ -f /var/log/openvas/openvas.log ]; do
+                sleep 2
+              done
+              tail -f /var/log/openvas/openvas.log
+          volumeMounts:
+            - name: openvas-log-data
+              mountPath: /var/log/openvas
+
+        # 8. GVM Data Fetcher API
+        - name: data-fetcher
+          image: "{{ .Values.images.dataFetcher.repository }}:{{ .Values.images.dataFetcher.tag }}"
+          imagePullPolicy: {{ .Values.images.dataFetcher.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.dataFetcher.port }}
+              protocol: TCP
+          env:
+            - name: PORT
+              value: {{ .Values.dataFetcher.port | quote }}
+            - name: FETCH_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: {{ .Values.dataFetcher.apiKey.existingSecretKey }}
+          resources:
+            {{- toYaml .Values.dataFetcher.resources | nindent 12 }}
+          volumeMounts:
+            - name: vt-data
+              mountPath: /dest/vt-data
+            - name: scap-data
+              mountPath: /dest/scap-data
+            - name: cert-data
+              mountPath: /dest/cert-data
+            - name: gvmd-data
+              mountPath: /dest/gvmd-data
+            - name: notus-data
+              mountPath: /dest/notus-data
+
+      volumes:
+        # PVC mounts
+        - name: vt-data
+          persistentVolumeClaim:
+            claimName: {{ include "greenbone.fullname" . }}-vt-data
+        - name: scap-data
+          persistentVolumeClaim:
+            claimName: {{ include "greenbone.fullname" . }}-scap-data
+        - name: cert-data
+          persistentVolumeClaim:
+            claimName: {{ include "greenbone.fullname" . }}-cert-data
+        - name: gvmd-data
+          persistentVolumeClaim:
+            claimName: {{ include "greenbone.fullname" . }}-gvmd-data
+        - name: notus-data
+          persistentVolumeClaim:
+            claimName: {{ include "greenbone.fullname" . }}-notus-data
+
+        # Shared Unix domain sockets & transient directories (emptyDir)
+        - name: gvmd-socket
+          emptyDir: {}
+        - name: ospd-socket
+          emptyDir: {}
+        - name: redis-socket
+          emptyDir: {}
+        - name: gpg-data
+          emptyDir: {}
+        - name: openvas-data
+          emptyDir: {}
+        - name: openvas-log-data
+          emptyDir: {}
+        - name: gsa-data
+          emptyDir: {}
+        - name: nginx-config
+          emptyDir: {}
+        - name: nginx-certificates
+          emptyDir: {}
+

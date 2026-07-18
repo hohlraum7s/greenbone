@@ -1,0 +1,148 @@
+# Default values for greenbone helm chart.
+
+# Name of the single existing Kubernetes Secret that contains all required credentials.
+# The keys in this secret can be mapped below.
+existingSecret: "greenbone-secrets"
+
+# Database Configuration
+database:
+  # The host of the PostgreSQL writer service.
+  # This defaults to the CNPG cluster write service name (cluster.name + "-rw").
+  # If overriding, you can specify it here.
+  host: ""
+  port: 5432
+  
+  # Credential keys within the existingSecret
+  username:
+    existingSecretKey: "db-user"
+  password:
+    existingSecretKey: "db-password"
+  databaseName:
+    existingSecretKey: "db-name"
+
+# Greenbone Vulnerability Manager administrator credentials
+# (Used to initialize/verify the GVM admin user)
+gvm:
+  adminUser:
+    existingSecretKey: "admin-user"
+  adminPassword:
+    existingSecretKey: "admin-password"
+
+# Data Fetcher API Sidecar Configuration
+# This Go application runs as a sidecar to receive feed uploads via HTTP POST
+dataFetcher:
+  port: 8080
+  apiKey:
+    existingSecretKey: "data-fetcher-password"
+  resources:
+    limits:
+      cpu: "500m"
+      memory: 512Mi
+    requests:
+      cpu: "100m"
+      memory: 128Mi
+
+
+# Persistence settings for the various GVM directories
+persistence:
+  storageClass: ""
+  vtData:
+    size: 15Gi
+    accessModes: ["ReadWriteOnce"]
+  scapData:
+    size: 10Gi
+    accessModes: ["ReadWriteOnce"]
+  certData:
+    size: 5Gi
+    accessModes: ["ReadWriteOnce"]
+  gvmdData:
+    size: 2Gi
+    accessModes: ["ReadWriteOnce"]
+  notusData:
+    size: 2Gi
+    accessModes: ["ReadWriteOnce"]
+
+
+# Image configurations for Greenbone components
+images:
+  gvmd:
+    repository: registry.community.greenbone.net/community/gvmd
+    tag: stable
+    pullPolicy: IfNotPresent
+  ospdOpenvas:
+    repository: registry.community.greenbone.net/community/ospd-openvas
+    tag: stable
+    pullPolicy: IfNotPresent
+  redis:
+    repository: registry.community.greenbone.net/community/redis-server
+    tag: latest
+    pullPolicy: IfNotPresent
+  openvasd:
+    repository: registry.community.greenbone.net/community/openvas-scanner
+    tag: stable
+    pullPolicy: IfNotPresent
+  gsad:
+    repository: registry.community.greenbone.net/community/gsad
+    tag: stable
+    pullPolicy: IfNotPresent
+  gsa:
+    repository: registry.community.greenbone.net/community/gsa
+    tag: stable-slim
+    pullPolicy: IfNotPresent
+  gvmConfig:
+    repository: registry.community.greenbone.net/community/gvm-config
+    tag: latest
+    pullPolicy: IfNotPresent
+  nginx:
+    repository: registry.community.greenbone.net/community/nginx
+    tag: latest
+    pullPolicy: IfNotPresent
+  dataFetcher:
+    repository: private-registry.local/gvm-data-fetcher
+    tag: latest
+    pullPolicy: IfNotPresent
+
+
+# Web service configuration (NGINX frontend)
+service:
+  type: ClusterIP
+  ports:
+    https: 443
+    gsa: 9392
+
+# Arbitrary extra Kubernetes manifests to render as part of the chart release.
+# Useful for defining custom Traefik IngressRoutes, TLS certificates, etc.
+extraObjects: []
+
+# Resources for GVM core pod
+resources:
+  limits:
+    cpu: "4"
+    memory: 8Gi
+  requests:
+    cpu: "1"
+    memory: 2Gi
+
+# Values passed directly to the dependent CloudNativePG cluster chart.
+# The cnpg/cluster chart creates the PostgreSQL Cluster custom resource.
+cluster:
+  # Override the cluster resource name
+  fullnameOverride: "gvm-pg-cluster"
+  
+  cluster:
+    instances: 3
+    # Custom pg-gvm image containing the postgresql-17-pg-gvm extension
+    imageName: private-registry.local/gvm-pg-cluster:17
+  
+    # Configure database storage
+    storage:
+      size: 20Gi
+      # storageClass: ""
+  
+    # Enable bootstrap and use credentials from our single existingSecret
+    initdb:
+      database: gvmd
+      owner: gvm
+      secret:
+        # Note: This MUST match the existingSecret name configured above
+        name: greenbone-secrets

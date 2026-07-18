@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "greenbone.fullname" . }}
+  labels:
+    {{- include "greenbone.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - name: https
+      port: {{ .Values.service.ports.https }}
+      targetPort: 443
+      protocol: TCP
+    - name: gsa
+      port: {{ .Values.service.ports.gsa }}
+      targetPort: 9392
+      protocol: TCP
+    - name: data-fetcher
+      port: {{ .Values.dataFetcher.port }}
+      targetPort: {{ .Values.dataFetcher.port }}
+      protocol: TCP
+  selector:
+    {{- include "greenbone.selectorLabels" . | nindent 4 }}

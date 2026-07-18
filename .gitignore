@@ -1,0 +1,35 @@
+# IDEs and editors
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Helm sub-charts and local dependency archives
+helm/greenbone/charts/*.tgz
+helm/greenbone/charts/
+
+# Go binaries and build artifacts
+data-fetcher/data-fetcher
+data-fetcher/data-fetcher.exe
+*.out
+*.test
+*.prof
+
+# Local secrets, keys, and environment configs
+*.env
+*.env.*
+*.key
+*.pem
+*.token
+
+# Local scratch/rendered files
+*rendered-templates.yaml
+*gvm-feed.tar.gz
+
+# Antigravity/Agent tracking files (optional)
+AGENT.md
