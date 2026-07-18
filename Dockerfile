@@ -4,7 +4,7 @@ FROM golang:1.22-alpine AS builder
 WORKDIR /app
 
 # Copy source file
-COPY main.go ./
+COPY data-fetcher/main.go ./
 
 # Initialize module and build a statically linked binary
 RUN go mod init data-fetcher && \

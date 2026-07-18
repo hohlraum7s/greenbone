@@ -51,7 +51,7 @@ Since this is an airgapped setup, build the `data-fetcher` container and push it
 
 ```bash
 # Build the Docker image
-docker build -t private-registry.local/gvm-data-fetcher:latest data-fetcher/
+docker build -t private-registry.local/gvm-data-fetcher:latest .
 
 # Push to your private registry
 docker push private-registry.local/gvm-data-fetcher:latest
